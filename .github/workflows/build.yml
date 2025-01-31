@@ -26,7 +26,7 @@ jobs:
         dnf -y install \
           cmake \
           gcc-c++ \
-          gtest-devel \
+          googletest-devel \
           make \
           git \
           epel-release
