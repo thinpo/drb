@@ -12,8 +12,7 @@
 #include <string>
 #include <chrono>
 #include <unordered_set>
-#include <mutex>
-#include <shared_mutex>
+#include <atomic>
 #include <memory>
 
 namespace drb {
@@ -73,77 +72,70 @@ namespace detail {
 template<typename T>
 class DynamicRingBuffer {
 private:
-    struct BufferState {
+    struct alignas(64) BufferState {  // Align to cache line to prevent false sharing
         std::vector<T> data;
-        int head;
-        int tail;
-        int size;
+        std::atomic<size_t> head;
+        std::atomic<size_t> tail;
+        std::atomic<size_t> size;
         double cached_mean;
-        bool mean_is_valid;
+        std::atomic<bool> mean_is_valid;
 
-        BufferState(int capacity = 4) 
+        BufferState(size_t capacity = 4) 
             : data(capacity), head(0), tail(0), size(0), 
               cached_mean(0), mean_is_valid(false) {}
     };
 
     std::shared_ptr<BufferState> state;
-    mutable std::unique_ptr<std::shared_mutex> mutex;
     static constexpr double SHRINK_FACTOR = 0.25;
 
-    // Helper function to get a snapshot of the current data
+    // Helper function to get a snapshot without locks
     std::vector<T> get_snapshot() const {
         std::vector<T> snapshot;
-        {
-            std::shared_lock lock(*mutex);
-            snapshot.reserve(state->size);
-            
-            if (state->head < state->tail) {
-                snapshot.insert(snapshot.end(),
-                              state->data.begin() + state->head,
-                              state->data.begin() + state->tail);
-            } else if (state->size > 0) {
-                snapshot.insert(snapshot.end(),
-                              state->data.begin() + state->head,
-                              state->data.end());
-                snapshot.insert(snapshot.end(),
-                              state->data.begin(),
-                              state->data.begin() + state->tail);
-            }
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        size_t current_head = state->head.load(std::memory_order_acquire);
+        size_t current_tail = state->tail.load(std::memory_order_acquire);
+        
+        snapshot.reserve(current_size);
+        
+        if (current_head < current_tail) {
+            snapshot.insert(snapshot.end(),
+                          state->data.begin() + current_head,
+                          state->data.begin() + current_tail);
+        } else if (current_size > 0) {
+            snapshot.insert(snapshot.end(),
+                          state->data.begin() + current_head,
+                          state->data.end());
+            snapshot.insert(snapshot.end(),
+                          state->data.begin(),
+                          state->data.begin() + current_tail);
         }
+        
         return snapshot;
     }
 
-    void resize(int new_capacity) {
+    void resize(size_t new_capacity) {
         std::vector<T> new_buffer(new_capacity);
-        int old_count;
-        std::vector<T> old_data;
+        size_t old_head = state->head.load(std::memory_order_acquire);
+        size_t old_tail = state->tail.load(std::memory_order_acquire);
+        size_t old_size = state->size.load(std::memory_order_acquire);
         
-        {
-            std::unique_lock lock(*mutex);
-            old_count = state->size;
-            old_data = std::move(state->data);
-        }
-        
-        if (state->head < state->tail) {
-            std::copy(old_data.begin() + state->head, 
-                     old_data.begin() + state->tail, 
+        if (old_head < old_tail) {
+            std::copy(state->data.begin() + old_head, 
+                     state->data.begin() + old_tail, 
                      new_buffer.begin());
-        } else if (old_count > 0) {
-            std::copy(old_data.begin() + state->head, 
-                     old_data.end(), 
-                     new_buffer.begin());
-            std::copy(old_data.begin(), 
-                     old_data.begin() + state->tail,
-                     new_buffer.begin() + (old_data.size() - state->head));
+        } else if (old_size > 0) {
+            auto it = std::copy(state->data.begin() + old_head, 
+                              state->data.end(), 
+                              new_buffer.begin());
+            std::copy(state->data.begin(), 
+                     state->data.begin() + old_tail,
+                     it);
         }
         
-        {
-            std::unique_lock lock(*mutex);
-            state->head = 0;
-            state->tail = old_count;
-            state->data = std::move(new_buffer);
-            state->mean_is_valid = false;
-        }
+        state->data = std::move(new_buffer);
+        state->head.store(0, std::memory_order_release);
+        state->tail.store(old_size, std::memory_order_release);
+        state->mean_is_valid.store(false, std::memory_order_release);
     }
 
     template<bool IsConst>
@@ -200,28 +192,23 @@ public:
     using iterator = Iterator<false>;
     using const_iterator = Iterator<true>;
 
-    explicit DynamicRingBuffer(int initial_capacity = 4)
-        : state(std::make_shared<BufferState>(initial_capacity)),
-          mutex(std::make_unique<std::shared_mutex>()) {}
+    explicit DynamicRingBuffer(size_t initial_capacity = 4)
+        : state(std::make_shared<BufferState>(initial_capacity)) {}
 
     ~DynamicRingBuffer() {
         // No need to delete buffer, std::vector handles it
     }
 
     DynamicRingBuffer(const DynamicRingBuffer& other)
-        : state(std::make_shared<BufferState>(*other.state)),
-          mutex(std::make_unique<std::shared_mutex>()) {}
+        : state(std::make_shared<BufferState>(*other.state)) {}
 
     DynamicRingBuffer(DynamicRingBuffer&& other) noexcept
-        : state(std::move(other.state)),
-          mutex(std::make_unique<std::shared_mutex>()) {
+        : state(std::move(other.state)) {
         other.state = std::make_shared<BufferState>();
     }
 
     DynamicRingBuffer& operator=(const DynamicRingBuffer& other) {
         if (this != &other) {
-            std::unique_lock lock(*mutex);
-            std::shared_lock other_lock(*other.mutex);
             state = std::make_shared<BufferState>(*other.state);
         }
         return *this;
@@ -229,8 +216,6 @@ public:
 
     DynamicRingBuffer& operator=(DynamicRingBuffer&& other) noexcept {
         if (this != &other) {
-            std::unique_lock lock(*mutex);
-            std::unique_lock other_lock(*other.mutex);
             state = std::move(other.state);
             other.state = std::make_shared<BufferState>();
         }
@@ -238,53 +223,55 @@ public:
     }
 
     void push(const T& value) {
-        bool needs_resize = false;
-        {
-            std::shared_lock lock(*mutex);
-            needs_resize = (state->size == state->data.size());
-        }
-        
-        if (needs_resize) {
-            int new_capacity;
-            {
-                std::shared_lock lock(*mutex);
-                new_capacity = state->data.size() * 2;
+        size_t current_size, current_capacity;
+        do {
+            current_size = state->size.load(std::memory_order_acquire);
+            current_capacity = state->data.size();
+            
+            if (current_size >= current_capacity) {
+                resize(current_capacity * 2);
+                continue;
             }
-            resize(new_capacity);
-        }
-        
-        {
-            std::unique_lock lock(*mutex);
-            state->data[state->tail] = value;
-            state->tail = (state->tail + 1) % state->data.size();
-            state->size++;
-            state->mean_is_valid = false;
-        }
+        } while (!state->size.compare_exchange_weak(current_size, current_size + 1,
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed));
+
+        size_t new_tail;
+        do {
+            new_tail = state->tail.load(std::memory_order_acquire);
+        } while (!state->tail.compare_exchange_weak(new_tail, (new_tail + 1) % state->data.size(),
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed));
+
+        state->data[new_tail] = value;
+        state->mean_is_valid.store(false, std::memory_order_release);
     }
 
     T pop() {
-        T value;
-        bool needs_resize = false;
-        int current_size;
-        int current_capacity;
-        
-        {
-            std::unique_lock lock(*mutex);
-            if (state->size == 0) {
-                throw std::runtime_error("Buffer is empty!");
-            }
-            value = state->data[state->head];
-            state->head = (state->head + 1) % state->data.size();
-            state->size--;
-            current_size = state->size;
-            current_capacity = state->data.size();
-            needs_resize = (current_size < current_capacity * SHRINK_FACTOR && current_capacity > 4);
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        if (current_size == 0) {
+            throw std::runtime_error("Buffer is empty!");
         }
 
-        if (needs_resize) {
-            resize(current_capacity / 2);
+        size_t new_head;
+        do {
+            new_head = state->head.load(std::memory_order_acquire);
+        } while (!state->head.compare_exchange_weak(new_head, (new_head + 1) % state->data.size(),
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed));
+
+        T value = state->data[new_head];
+
+        do {
+            current_size = state->size.load(std::memory_order_acquire);
+        } while (!state->size.compare_exchange_weak(current_size, current_size - 1,
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed));
+
+        if (current_size < state->data.size() * SHRINK_FACTOR && state->data.size() > 4) {
+            resize(state->data.size() / 2);
         }
-        
+
         return value;
     }
 
@@ -366,32 +353,25 @@ public:
             temp[new_idx] = std::move(data[i]);
         }
 
-        {
-            std::unique_lock lock(*mutex);
-            for (size_t i = 0; i < data.size(); ++i) {
-                state->data[(state->head + i) % state->data.size()] = std::move(temp[i]);
-            }
-        }
+        state->data = std::move(temp);
+        state->head.store(0, std::memory_order_release);
+        state->tail.store(data.size(), std::memory_order_release);
     }
 
     bool isEmpty() const { 
-        std::shared_lock lock(*mutex);
-        return state->size == 0; 
+        return state->size.load(std::memory_order_acquire) == 0; 
     }
     
     bool isFull() const { 
-        std::shared_lock lock(*mutex);
-        return state->size == state->data.size(); 
+        return state->size.load(std::memory_order_acquire) == state->data.size(); 
     }
     
-    int getCapacity() const { 
-        std::shared_lock lock(*mutex);
+    size_t getCapacity() const { 
         return state->data.size(); 
     }
     
-    int getSize() const { 
-        std::shared_lock lock(*mutex);
-        return state->size; 
+    size_t getSize() const { 
+        return state->size.load(std::memory_order_acquire); 
     }
 
     void add(T value) {
@@ -399,17 +379,21 @@ public:
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (state->size >= Traits::vector_size) {
+            size_t current_size = state->size.load(std::memory_order_acquire);
+            if (current_size >= Traits::vector_size) {
                 const SimdType value_vec = Traits::set1(value);
                 const size_t vec_size = Traits::vector_size;
                 
                 std::vector<T> aligned_data;
-                if (state->head < state->tail) {
-                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
+                size_t current_head = state->head.load(std::memory_order_acquire);
+                size_t current_tail = state->tail.load(std::memory_order_acquire);
+                
+                if (current_head < current_tail) {
+                    aligned_data.assign(state->data.begin() + current_head, state->data.begin() + current_tail);
                 } else {
-                    aligned_data.reserve(state->size);
-                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
-                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
+                    aligned_data.reserve(current_size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + current_head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + current_tail);
                 }
 
                 size_t i = 0;
@@ -419,11 +403,11 @@ public:
                     Traits::store(&aligned_data[i], data);
                 }
 
-                if (state->head < state->tail) {
-                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + state->head);
+                if (current_head < current_tail) {
+                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + current_head);
                 } else {
-                    size_t first_part = state->data.size() - state->head;
-                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + state->head);
+                    size_t first_part = state->data.size() - current_head;
+                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + current_head);
                     std::copy(aligned_data.begin() + first_part, aligned_data.end(), state->data.begin());
                 }
 
@@ -434,8 +418,9 @@ public:
             }
         }
         
-        for (int i = 0; i < state->size; i++) {
-            int idx = (state->head + i) % state->data.size();
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        for (size_t i = 0; i < current_size; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             state->data[idx] += value;
         }
     }
@@ -445,17 +430,21 @@ public:
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (state->size >= Traits::vector_size) {
+            size_t current_size = state->size.load(std::memory_order_acquire);
+            if (current_size >= Traits::vector_size) {
                 const SimdType value_vec = Traits::set1(value);
                 const size_t vec_size = Traits::vector_size;
                 
                 std::vector<T> aligned_data;
-                if (state->head < state->tail) {
-                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
+                size_t current_head = state->head.load(std::memory_order_acquire);
+                size_t current_tail = state->tail.load(std::memory_order_acquire);
+                
+                if (current_head < current_tail) {
+                    aligned_data.assign(state->data.begin() + current_head, state->data.begin() + current_tail);
                 } else {
-                    aligned_data.reserve(state->size);
-                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
-                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
+                    aligned_data.reserve(current_size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + current_head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + current_tail);
                 }
 
                 size_t i = 0;
@@ -465,11 +454,11 @@ public:
                     Traits::store(&aligned_data[i], data);
                 }
 
-                if (state->head < state->tail) {
-                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + state->head);
+                if (current_head < current_tail) {
+                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + current_head);
                 } else {
-                    size_t first_part = state->data.size() - state->head;
-                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + state->head);
+                    size_t first_part = state->data.size() - current_head;
+                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + current_head);
                     std::copy(aligned_data.begin() + first_part, aligned_data.end(), state->data.begin());
                 }
 
@@ -480,8 +469,9 @@ public:
             }
         }
         
-        for (int i = 0; i < state->size; i++) {
-            int idx = (state->head + i) % state->data.size();
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        for (size_t i = 0; i < current_size; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             state->data[idx] *= value;
         }
     }
@@ -491,17 +481,21 @@ public:
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (state->size >= Traits::vector_size) {
+            size_t current_size = state->size.load(std::memory_order_acquire);
+            if (current_size >= Traits::vector_size) {
                 SimdType sum_vec = Traits::set1(0);
                 const size_t vec_size = Traits::vector_size;
                 std::vector<T> aligned_data;
                 
-                if (state->head < state->tail) {
-                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
+                size_t current_head = state->head.load(std::memory_order_acquire);
+                size_t current_tail = state->tail.load(std::memory_order_acquire);
+                
+                if (current_head < current_tail) {
+                    aligned_data.assign(state->data.begin() + current_head, state->data.begin() + current_tail);
                 } else {
-                    aligned_data.reserve(state->size);
-                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
-                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
+                    aligned_data.reserve(current_size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + current_head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + current_tail);
                 }
 
                 size_t i = 0;
@@ -521,8 +515,9 @@ public:
         }
         
         T total = 0;
-        for (int i = 0; i < state->size; i++) {
-            int idx = (state->head + i) % state->data.size();
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        for (size_t i = 0; i < current_size; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             total += state->data[idx];
         }
         return total;
@@ -530,41 +525,43 @@ public:
 
     T max() const {
         if (isEmpty()) throw std::runtime_error("Buffer is empty!");
-        T max_val = state->data[state->head];
-        for (int i = 1; i < state->size; i++) {
-            int idx = (state->head + i) % state->data.size();
+        T max_val = state->data[state->head.load(std::memory_order_acquire)];
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        for (size_t i = 1; i < current_size; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             max_val = std::max(max_val, state->data[idx]);
         }
         return max_val;
     }
 
-    std::vector<T> slice(int start, int end) const {
+    std::vector<T> slice(size_t start, size_t end) const {
         std::vector<T> result;
-        int actual_size = state->size;
+        size_t actual_size = state->size.load(std::memory_order_acquire);
         start = (start < 0) ? actual_size + start : start;
         end = (end < 0) ? actual_size + end : end;
         end = std::min(end, actual_size);
 
-        for (int i = start; i < end; i++) {
-            int idx = (state->head + i) % state->data.size();
+        for (size_t i = start; i < end; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             result.push_back(state->data[idx]);
         }
         return result;
     }
 
     void map(const std::function<T(T)>& func) {
-        for (int i = 0; i < state->size; i++) {
-            int idx = (state->head + i) % state->data.size();
+        size_t current_size = state->size.load(std::memory_order_acquire);
+        for (size_t i = 0; i < current_size; i++) {
+            size_t idx = (state->head.load(std::memory_order_acquire) + i) % state->data.size();
             state->data[idx] = func(state->data[idx]);
         }
     }
 
     void reverse() {
-        int left = 0;
-        int right = state->size - 1;
+        size_t left = 0;
+        size_t right = state->size.load(std::memory_order_acquire) - 1;
         while (left < right) {
-            int left_idx = (state->head + left) % state->data.size();
-            int right_idx = (state->head + right) % state->data.size();
+            size_t left_idx = (state->head.load(std::memory_order_acquire) + left) % state->data.size();
+            size_t right_idx = (state->head.load(std::memory_order_acquire) + right) % state->data.size();
             std::swap(state->data[left_idx], state->data[right_idx]);
             left++;
             right--;
@@ -572,43 +569,53 @@ public:
     }
 
     void concatenate(const DynamicRingBuffer& other) {
-        for (int i = 0; i < other.state->size; i++) {
-            int idx = (other.state->head + i) % other.state->data.size();
+        size_t other_size = other.state->size.load(std::memory_order_acquire);
+        for (size_t i = 0; i < other_size; i++) {
+            size_t idx = (other.state->head.load(std::memory_order_acquire) + i) % other.state->data.size();
             this->push(other.state->data[idx]);
         }
     }
 
     double mean() const {
         if (isEmpty()) throw std::runtime_error("Buffer is empty!");
-        if (!state->mean_is_valid) {
-            state->cached_mean = static_cast<double>(sum()) / state->size;
-            state->mean_is_valid = true;
+        if (!state->mean_is_valid.load(std::memory_order_acquire)) {
+            double cached_mean = state->cached_mean;
+            double total = static_cast<double>(sum());
+            double size = static_cast<double>(state->size.load(std::memory_order_acquire));
+            double mean = total / size;
+            state->cached_mean = mean;
+            state->mean_is_valid.store(true, std::memory_order_release);
+            return mean;
         }
         return state->cached_mean;
     }
 
     double variance() const {
-        if (state->size < 2) throw std::runtime_error("Need at least 2 elements!");
+        if (state->size.load(std::memory_order_acquire) < 2) throw std::runtime_error("Need at least 2 elements!");
         double m = mean();  // Use cached mean if available
         double sum_sq = 0;
         
-        if (state->head < state->tail) {
-            for (int i = state->head; i < state->tail; ++i) {
+        size_t current_head = state->head.load(std::memory_order_acquire);
+        size_t current_tail = state->tail.load(std::memory_order_acquire);
+        
+        if (current_head < current_tail) {
+            for (size_t i = current_head; i < current_tail; ++i) {
                 double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
         } else {
-            for (int i = state->head; i < state->data.size(); ++i) {
+            for (size_t i = current_head; i < state->data.size(); ++i) {
                 double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
-            for (int i = 0; i < state->tail; ++i) {
+            for (size_t i = 0; i < current_tail; ++i) {
                 double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
         }
         
-        return sum_sq / (state->size - 1);
+        size_t size = state->size.load(std::memory_order_acquire);
+        return sum_sq / (size - 1);
     }
 
     double stddev() const {
@@ -620,34 +627,37 @@ public:
         
         // Use nth_element instead of full sort
         std::vector<T> temp;
-        temp.reserve(state->size);
+        temp.reserve(state->size.load(std::memory_order_acquire));
         
-        if (state->head < state->tail) {
-            temp.insert(temp.end(), state->data.begin() + state->head, state->data.begin() + state->tail);
+        size_t current_head = state->head.load(std::memory_order_acquire);
+        size_t current_tail = state->tail.load(std::memory_order_acquire);
+        
+        if (current_head < current_tail) {
+            temp.insert(temp.end(), state->data.begin() + current_head, state->data.begin() + current_tail);
         } else {
-            temp.insert(temp.end(), state->data.begin() + state->head, state->data.end());
-            temp.insert(temp.end(), state->data.begin(), state->data.begin() + state->tail);
+            temp.insert(temp.end(), state->data.begin() + current_head, state->data.end());
+            temp.insert(temp.end(), state->data.begin(), state->data.begin() + current_tail);
         }
         
-        if (state->size % 2 == 0) {
-            int mid = state->size / 2;
+        if (state->size.load(std::memory_order_acquire) % 2 == 0) {
+            size_t mid = state->size.load(std::memory_order_acquire) / 2;
             std::nth_element(temp.begin(), temp.begin() + mid - 1, temp.end());
             T left = temp[mid - 1];
             std::nth_element(temp.begin() + mid, temp.begin() + mid, temp.end());
             return (left + temp[mid]) / T(2);
         } else {
-            int mid = state->size / 2;
+            size_t mid = state->size.load(std::memory_order_acquire) / 2;
             std::nth_element(temp.begin(), temp.begin() + mid, temp.end());
             return temp[mid];
         }
     }
 
     iterator begin() { return iterator(this, 0); }
-    iterator end() { return iterator(this, state->size); }
+    iterator end() { return iterator(this, state->size.load(std::memory_order_acquire)); }
     const_iterator begin() const { return const_iterator(this, 0); }
-    const_iterator end() const { return const_iterator(this, state->size); }
+    const_iterator end() const { return const_iterator(this, state->size.load(std::memory_order_acquire)); }
     const_iterator cbegin() const { return const_iterator(this, 0); }
-    const_iterator cend() const { return const_iterator(this, state->size); }
+    const_iterator cend() const { return const_iterator(this, state->size.load(std::memory_order_acquire)); }
 };
 
 } // namespace drb 

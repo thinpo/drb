@@ -46,7 +46,9 @@ TEST_F(MarketDataTest, VWAP) {
     
     // Manual VWAP calculation for verification
     // (100.00 * 100 + 101.00 * 200 + 102.00 * 300 + 101.50 * 250) / (100 + 200 + 300 + 250)
-    double expected_vwap = 101.4411764705882;
+    // Note: 100.50 trade is excluded due to "OUT" condition
+    double expected_vwap = (100.00 * 100 + 101.00 * 200 + 102.00 * 300 + 101.50 * 250) / 
+                          static_cast<double>(100 + 200 + 300 + 250);
     
     EXPECT_NEAR(vwap, expected_vwap, 1e-10);
 }
