@@ -14,6 +14,9 @@
 #include <unordered_set>
 #include <atomic>
 #include <memory>
+#include <future>
+#include <thread>
+#include <unordered_map>
 
 namespace drb {
 
@@ -658,6 +661,166 @@ public:
     const_iterator end() const { return const_iterator(this, state->size.load(std::memory_order_acquire)); }
     const_iterator cbegin() const { return const_iterator(this, 0); }
     const_iterator cend() const { return const_iterator(this, state->size.load(std::memory_order_acquire)); }
+
+    // MapReduce functionality
+    template<typename K, typename V, typename MapFunc, typename ReduceFunc>
+    std::unordered_map<K, V> mapReduce(
+        MapFunc mapFunc,      // Function: T -> pair<K, V>
+        ReduceFunc reduceFunc,// Function: (V, V) -> V
+        size_t num_workers = std::thread::hardware_concurrency()
+    ) const {
+        std::vector<T> data = get_snapshot();
+        if (data.empty()) return {};
+
+        // 1. Map Phase
+        std::vector<std::future<std::vector<std::pair<K, V>>>> map_futures;
+        std::vector<std::vector<std::pair<K, V>>> mapped_results;
+        
+        size_t chunk_size = std::max(size_t(1), data.size() / num_workers);
+        for (size_t i = 0; i < data.size(); i += chunk_size) {
+            size_t end = std::min(i + chunk_size, data.size());
+            map_futures.push_back(std::async(std::launch::async, [&, i, end]() {
+                std::vector<std::pair<K, V>> chunk_result;
+                for (size_t j = i; j < end; ++j) {
+                    chunk_result.push_back(mapFunc(data[j]));
+                }
+                return chunk_result;
+            }));
+        }
+
+        // Collect map results
+        for (auto& future : map_futures) {
+            mapped_results.push_back(future.get());
+        }
+
+        // 2. Shuffle Phase
+        std::unordered_map<K, std::vector<V>> shuffled;
+        for (const auto& chunk : mapped_results) {
+            for (const auto& [key, value] : chunk) {
+                shuffled[key].push_back(value);
+            }
+        }
+
+        // 3. Reduce Phase
+        std::vector<std::future<std::pair<K, V>>> reduce_futures;
+        for (const auto& [key, values] : shuffled) {
+            reduce_futures.push_back(std::async(std::launch::async, [&, key, values]() {
+                if (values.empty()) {
+                    return std::make_pair(key, V{});
+                }
+                V result = values[0];
+                for (size_t i = 1; i < values.size(); ++i) {
+                    result = reduceFunc(result, values[i]);
+                }
+                return std::make_pair(key, result);
+            }));
+        }
+
+        // Collect reduce results
+        std::unordered_map<K, V> result;
+        for (auto& future : reduce_futures) {
+            auto [key, value] = future.get();
+            result[key] = value;
+        }
+
+        return result;
+    }
+
+    // Convenience method for word count
+    std::unordered_map<std::string, size_t> wordCount(
+        size_t num_workers = std::thread::hardware_concurrency()
+    ) const requires std::is_same_v<T, std::string> {
+        return mapReduce<std::string, size_t>(
+            // Map function: Split string into words and count each as 1
+            [](const std::string& str) {
+                std::string word;
+                size_t count = 0;
+                for (char c : str) {
+                    if (std::isalnum(c)) {
+                        word += std::tolower(c);
+                    } else if (!word.empty()) {
+                        count++;
+                        word.clear();
+                    }
+                }
+                if (!word.empty()) {
+                    count++;
+                }
+                return std::make_pair(str, count);
+            },
+            // Reduce function: Sum the counts
+            [](size_t a, size_t b) { return a + b; },
+            num_workers
+        );
+    }
+
+    // Parallel aggregation with custom functions
+    template<typename R, typename MapFunc, typename ReduceFunc>
+    R parallelAggregate(
+        MapFunc mapFunc,      // Function: T -> R
+        ReduceFunc reduceFunc,// Function: (R, R) -> R
+        R initial_value,
+        size_t num_workers = std::thread::hardware_concurrency()
+    ) const {
+        std::vector<T> data = get_snapshot();
+        if (data.empty()) return initial_value;
+
+        std::vector<std::future<R>> futures;
+        size_t chunk_size = std::max(size_t(1), data.size() / num_workers);
+        
+        for (size_t i = 0; i < data.size(); i += chunk_size) {
+            size_t end = std::min(i + chunk_size, data.size());
+            futures.push_back(std::async(std::launch::async, [&, i, end]() {
+                R result = initial_value;
+                for (size_t j = i; j < end; ++j) {
+                    result = reduceFunc(result, mapFunc(data[j]));
+                }
+                return result;
+            }));
+        }
+
+        R final_result = initial_value;
+        for (auto& future : futures) {
+            final_result = reduceFunc(final_result, future.get());
+        }
+
+        return final_result;
+    }
+
+    // Parallel filter
+    DynamicRingBuffer<T> parallelFilter(
+        std::function<bool(const T&)> predicate,
+        size_t num_workers = std::thread::hardware_concurrency()
+    ) const {
+        std::vector<T> data = get_snapshot();
+        if (data.empty()) return DynamicRingBuffer<T>();
+
+        std::vector<std::future<std::vector<T>>> futures;
+        size_t chunk_size = std::max(size_t(1), data.size() / num_workers);
+        
+        for (size_t i = 0; i < data.size(); i += chunk_size) {
+            size_t end = std::min(i + chunk_size, data.size());
+            futures.push_back(std::async(std::launch::async, [&, i, end]() {
+                std::vector<T> result;
+                for (size_t j = i; j < end; ++j) {
+                    if (predicate(data[j])) {
+                        result.push_back(data[j]);
+                    }
+                }
+                return result;
+            }));
+        }
+
+        DynamicRingBuffer<T> result;
+        for (auto& future : futures) {
+            auto filtered = future.get();
+            for (const auto& item : filtered) {
+                result.push(item);
+            }
+        }
+
+        return result;
+    }
 };
 
 } // namespace drb 

@@ -17,5 +17,14 @@ target_link_libraries(market_data_tests PRIVATE
     pthread
 )
 
+add_executable(mapreduce_tests mapreduce_tests.cpp)
+target_link_libraries(mapreduce_tests PRIVATE 
+    dynamic_ring_buffer
+    GTest::GTest 
+    GTest::Main
+    pthread
+)
+
 gtest_discover_tests(ring_buffer_tests)
-gtest_discover_tests(market_data_tests) 
+gtest_discover_tests(market_data_tests)
+gtest_discover_tests(mapreduce_tests) 
