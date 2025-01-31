@@ -4,10 +4,6 @@
         "dockerfile": "Dockerfile",
         "context": "."
     },
-    "features": {
-        "git": "latest",
-        "github-cli": "latest"
-    },
     "customizations": {
         "vscode": {
             "extensions": [
@@ -20,11 +16,11 @@
             "settings": {
                 "cmake.configureOnOpen": true,
                 "cmake.buildDirectory": "${workspaceFolder}/build",
+                "cmake.generator": "Ninja",
                 "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
             }
         }
     },
-    "forwardPorts": [],
-    "postCreateCommand": "git config --global init.defaultBranch main",
-    "remoteUser": "vscode"
-} 
+    "remoteUser": "vscode",
+    "postCreateCommand": "cmake -B build -G Ninja -DBUILD_TESTS=ON && cmake --build build"
+}
