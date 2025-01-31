@@ -1,0 +1,36 @@
+{
+    "name": "SimulatedExchange",
+    "market_data_port": 5555,
+    "bar_publish_port": 5556,
+    "exchange_endpoints": {
+        "NASDAQ": "tcp://localhost:5557",
+        "NYSE": "tcp://localhost:5558",
+        "IEX": "tcp://localhost:5559"
+    },
+    "bars": [
+        {
+            "symbol": "AAPL",
+            "interval_seconds": 60,
+            "source_exchanges": ["NASDAQ", "IEX"],
+            "include_trades": true,
+            "include_quotes": true,
+            "excluded_conditions": ["OUT", "LATE"]
+        },
+        {
+            "symbol": "MSFT",
+            "interval_seconds": 300,
+            "source_exchanges": ["NYSE", "NASDAQ"],
+            "include_trades": true,
+            "include_quotes": false,
+            "excluded_conditions": ["OUT", "LATE", "FORM_T"]
+        },
+        {
+            "symbol": "GOOGL",
+            "interval_seconds": 60,
+            "source_exchanges": ["NASDAQ"],
+            "include_trades": true,
+            "include_quotes": true,
+            "excluded_conditions": ["OUT"]
+        }
+    ]
+} 
