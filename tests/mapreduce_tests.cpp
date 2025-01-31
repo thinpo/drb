@@ -88,7 +88,11 @@ TEST_F(MapReduceTest, ParallelProcessing) {
     for (size_t workers : worker_counts) {
         auto result = number_buffer.mapReduce<int, int64_t>(
             // Map: Create key-value pairs where key is number mod 3
-            [](int x) { return std::make_pair(x % 3, static_cast<int64_t>(x)); },
+            [](int x) {
+                std::vector<std::pair<int, int64_t>> result;
+                result.emplace_back(x % 3, static_cast<int64_t>(x));
+                return result;
+            },
             // Reduce: Sum values
             [](int64_t a, int64_t b) { return a + b; },
             workers
@@ -108,7 +112,11 @@ TEST_F(MapReduceTest, EmptyBuffer) {
     drb::DynamicRingBuffer<std::string> empty_buffer;
     
     auto result = empty_buffer.mapReduce<std::string, int>(
-        [](const std::string&) { return std::make_pair(std::string(), 1); },
+        [](const std::string&) {
+            std::vector<std::pair<std::string, int>> result;
+            result.emplace_back("", 1);
+            return result;
+        },
         [](int a, int b) { return a + b; }
     );
 

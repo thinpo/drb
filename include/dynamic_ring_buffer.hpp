@@ -665,7 +665,7 @@ public:
     // MapReduce functionality
     template<typename K, typename V, typename MapFunc, typename ReduceFunc>
     std::unordered_map<K, V> mapReduce(
-        MapFunc mapFunc,      // Function: T -> pair<K, V>
+        MapFunc mapFunc,      // Function: T -> vector<pair<K, V>>
         ReduceFunc reduceFunc,// Function: (V, V) -> V
         size_t num_workers = std::thread::hardware_concurrency()
     ) const {
@@ -682,7 +682,8 @@ public:
             map_futures.push_back(std::async(std::launch::async, [&, i, end]() {
                 std::vector<std::pair<K, V>> chunk_result;
                 for (size_t j = i; j < end; ++j) {
-                    chunk_result.push_back(mapFunc(data[j]));
+                    auto mapped = mapFunc(data[j]);
+                    chunk_result.insert(chunk_result.end(), mapped.begin(), mapped.end());
                 }
                 return chunk_result;
             }));
@@ -734,19 +735,19 @@ public:
             // Map function: Split string into words and count each as 1
             [](const std::string& str) {
                 std::string word;
-                size_t count = 0;
+                std::vector<std::pair<std::string, size_t>> result;
                 for (char c : str) {
                     if (std::isalnum(c)) {
                         word += std::tolower(c);
                     } else if (!word.empty()) {
-                        count++;
+                        result.emplace_back(word, 1);
                         word.clear();
                     }
                 }
                 if (!word.empty()) {
-                    count++;
+                    result.emplace_back(word, 1);
                 }
-                return std::make_pair(str, count);
+                return result;
             },
             // Reduce function: Sum the counts
             [](size_t a, size_t b) { return a + b; },
