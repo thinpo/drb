@@ -29,7 +29,9 @@ RUN apt-get update && \
     libgtest-dev \
     cmake-data \
     gcc-13 \
-    g++-13 && \
+    g++-13 \
+    zsh \
+    fonts-powerline && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -52,6 +54,21 @@ ENV CCACHE_DIR=/ccache
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
+# Install Oh My Zsh and plugins
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended && \
+    git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions && \
+    git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting && \
+    sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="agnoster"/' ~/.zshrc && \
+    sed -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting docker cmake)/' ~/.zshrc
+
+# Set zsh as default shell
+USER root
+RUN chsh -s /usr/bin/zsh $USERNAME
+USER $USERNAME
+
 # Configure git
 RUN git config --global core.editor "vim" && \
     git config --global init.defaultBranch main
+
+# Set default shell to zsh
+ENV SHELL=/usr/bin/zsh
