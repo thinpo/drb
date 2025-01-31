@@ -293,15 +293,13 @@ public:
     // Outer product: applies a binary operation between all pairs of elements
     template<typename BinaryOp>
     std::vector<std::vector<T>> outer_product(const DynamicRingBuffer<T>& other, BinaryOp op) const {
-        std::shared_lock lock(*mutex);
-        std::shared_lock other_lock(*other.mutex);
+        std::vector<T> this_data = get_snapshot();
+        std::vector<T> other_data = other.get_snapshot();
         
-        std::vector<std::vector<T>> result(state->size, std::vector<T>(other.state->size));
-        for (int i = 0; i < state->size; ++i) {
-            for (int j = 0; j < other.state->size; ++j) {
-                int this_idx = (state->head + i) % state->data.size();
-                int other_idx = (other.state->head + j) % other.state->data.size();
-                result[i][j] = op(state->data[this_idx], other.state->data[other_idx]);
+        std::vector<std::vector<T>> result(this_data.size(), std::vector<T>(other_data.size()));
+        for (size_t i = 0; i < this_data.size(); ++i) {
+            for (size_t j = 0; j < other_data.size(); ++j) {
+                result[i][j] = op(this_data[i], other_data[j]);
             }
         }
         return result;
@@ -309,16 +307,15 @@ public:
 
     // Compress: keep only elements where mask is true
     DynamicRingBuffer<T> compress(const std::vector<bool>& mask) const {
-        std::shared_lock lock(*mutex);
-        if (mask.size() != state->size) {
+        std::vector<T> data = get_snapshot();
+        if (mask.size() != data.size()) {
             throw std::invalid_argument("Mask size must match buffer size");
         }
 
         DynamicRingBuffer<T> result;
-        for (int i = 0; i < state->size; ++i) {
+        for (size_t i = 0; i < data.size(); ++i) {
             if (mask[i]) {
-                int idx = (state->head + i) % state->data.size();
-                result.push(state->data[idx]);
+                result.push(data[i]);
             }
         }
         return result;
@@ -326,14 +323,13 @@ public:
 
     // Expand: insert default values where mask is false
     DynamicRingBuffer<T> expand(const std::vector<bool>& mask, const T& default_value = T()) const {
-        std::shared_lock lock(*mutex);
+        std::vector<T> data = get_snapshot();
         DynamicRingBuffer<T> result;
-        int buffer_idx = 0;
+        size_t buffer_idx = 0;
 
         for (bool keep : mask) {
-            if (keep && buffer_idx < state->size) {
-                int idx = (state->head + buffer_idx++) % state->data.size();
-                result.push(state->data[idx]);
+            if (keep && buffer_idx < data.size()) {
+                result.push(data[buffer_idx++]);
             } else {
                 result.push(default_value);
             }
@@ -344,14 +340,13 @@ public:
     // Scan/Prefix operations with binary operator
     template<typename BinaryOp>
     DynamicRingBuffer<T> scan(BinaryOp op, const T& initial = T()) const {
-        std::shared_lock lock(*mutex);
+        std::vector<T> data = get_snapshot();
         DynamicRingBuffer<T> result;
-        if (isEmpty()) return result;
+        if (data.empty()) return result;
 
         T accumulator = initial;
-        for (int i = 0; i < state->size; ++i) {
-            int idx = (state->head + i) % state->data.size();
-            accumulator = op(accumulator, state->data[idx]);
+        for (const T& value : data) {
+            accumulator = op(accumulator, value);
             result.push(accumulator);
         }
         return result;
@@ -359,21 +354,23 @@ public:
 
     // Rotate elements by n positions
     void rotate(int n) {
-        std::unique_lock lock(*mutex);
-        if (isEmpty()) return;
+        std::vector<T> data = get_snapshot();
+        if (data.empty()) return;
         
-        n = ((n % state->size) + state->size) % state->size; // Normalize n to positive value
+        n = ((n % data.size()) + data.size()) % data.size(); // Normalize n to positive value
         if (n == 0) return;
 
-        std::vector<T> temp(state->size);
-        for (int i = 0; i < state->size; ++i) {
-            int old_idx = (state->head + i) % state->data.size();
-            int new_idx = (i + n) % state->size;
-            temp[new_idx] = state->data[old_idx];
+        std::vector<T> temp(data.size());
+        for (size_t i = 0; i < data.size(); ++i) {
+            size_t new_idx = (i + n) % data.size();
+            temp[new_idx] = std::move(data[i]);
         }
 
-        for (int i = 0; i < state->size; ++i) {
-            state->data[(state->head + i) % state->data.size()] = temp[i];
+        {
+            std::unique_lock lock(*mutex);
+            for (size_t i = 0; i < data.size(); ++i) {
+                state->data[(state->head + i) % state->data.size()] = std::move(temp[i]);
+            }
         }
     }
 
