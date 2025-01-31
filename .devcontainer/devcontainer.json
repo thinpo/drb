@@ -1,10 +1,12 @@
 {
-    "name": "C++ Development Container",
+    "name": "Rocky Linux 9 C++",
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "Dockerfile",
+        "context": "."
     },
     "features": {
-        "ghcr.io/devcontainers/features/github-cli:1": {}
+        "git": "latest",
+        "github-cli": "latest"
     },
     "customizations": {
         "vscode": {
@@ -12,8 +14,14 @@
                 "ms-vscode.cpptools",
                 "ms-vscode.cmake-tools",
                 "twxs.cmake",
-                "ms-vscode.cpptools-extension-pack"
-            ]
+                "ms-vscode.cpptools-extension-pack",
+                "eamodio.gitlens"
+            ],
+            "settings": {
+                "cmake.configureOnOpen": true,
+                "cmake.buildDirectory": "${workspaceFolder}/build",
+                "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+            }
         }
     },
     "forwardPorts": [],
