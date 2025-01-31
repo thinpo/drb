@@ -8,15 +8,18 @@ protected:
     drb::market::TradeBuffer trade_buffer;
     drb::market::QuoteBuffer quote_buffer;
     const std::string test_symbol = "TEST";
-    std::unordered_set<std::string> excluded_conditions{"OUT_OF_SEQUENCE", "LATE"};
+    std::unordered_set<drb::market::SaleCondition> excluded_conditions;
 
     void SetUp() override {
         // Add some test trades
         trade_buffer.push(drb::market::Trade(test_symbol, 100.00, 100));
         trade_buffer.push(drb::market::Trade(test_symbol, 101.00, 200));
-        trade_buffer.push(drb::market::Trade(test_symbol, 100.50, 150, "OUT_OF_SEQUENCE"));
+        trade_buffer.push(drb::market::Trade(test_symbol, 100.50, 150, "OUT"));  // Out of sequence
         trade_buffer.push(drb::market::Trade(test_symbol, 102.00, 300));
         trade_buffer.push(drb::market::Trade(test_symbol, 101.50, 250));
+
+        // Set up excluded conditions
+        excluded_conditions.insert(drb::market::sale_condition::from_string("OUT"));
 
         // Add some test quotes
         quote_buffer.push(drb::market::Quote(test_symbol, 100.00, 100.10, 100, 100));
@@ -32,7 +35,9 @@ TEST_F(MarketDataTest, FilteredTrades) {
     
     // Verify the filtered trade is not included
     auto it = std::find_if(filtered.begin(), filtered.end(),
-        [](const drb::market::Trade& t) { return t.sale_condition == "OUT_OF_SEQUENCE"; });
+        [](const drb::market::Trade& t) { 
+            return t.sale_condition == drb::market::sale_condition::from_string("OUT"); 
+        });
     EXPECT_EQ(it, filtered.end());
 }
 
