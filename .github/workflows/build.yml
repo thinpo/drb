@@ -22,23 +22,41 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential googletest libgtest-dev
+        sudo apt-get install -y cmake build-essential
+        # Build and install GTest from source
+        sudo apt-get install -y libgtest-dev
+        cd /usr/src/gtest
+        sudo cmake CMakeLists.txt
+        sudo make
+        sudo cp lib/*.a /usr/lib
+        cd -
 
     - name: Install Dependencies (macOS)
       if: runner.os == 'macOS'
       run: |
-        brew install cmake googletest
+        brew install cmake
+        # Build and install GTest from source
+        git clone https://github.com/google/googletest.git
+        cd googletest
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+        sudo cmake --install build
+        cd ..
 
     - name: Configure CMake
       run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBUILD_TESTS=ON
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DBUILD_TESTS=ON \
+          -DCMAKE_CXX_FLAGS="-mavx2"
 
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }}
 
     - name: Run Tests
       working-directory: build
-      run: ctest -C ${{ matrix.build_type }} --output-on-failure
+      run: |
+        ctest -C ${{ matrix.build_type }} --output-on-failure
 
     - name: Run Demo
       working-directory: build
