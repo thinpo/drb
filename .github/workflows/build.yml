@@ -22,16 +22,13 @@ jobs:
     - name: Install Dependencies
       run: |
         dnf -y update
-        dnf -y install dnf-plugins-core epel-release
-        dnf -y config-manager --set-enabled crb
         dnf -y groupinstall "Development Tools"
         dnf -y install \
           cmake \
           gcc-c++ \
-          googletest-devel \
           make \
-          git
-        dnf -y install ninja-build
+          git \
+          ninja-build
 
     - name: Configure CMake
       run: |
