@@ -1,7 +1,10 @@
 {
-    "name": "C++ Development",
+    "name": "C++ Development Container",
     "build": {
         "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/github-cli:1": {}
     },
     "customizations": {
         "vscode": {
@@ -14,6 +17,6 @@
         }
     },
     "forwardPorts": [],
-    "postCreateCommand": "cmake -B build && cmake --build build",
+    "postCreateCommand": "git config --global init.defaultBranch main",
     "remoteUser": "vscode"
 } 
