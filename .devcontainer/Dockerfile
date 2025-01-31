@@ -1,28 +1,31 @@
-FROM rockylinux/rockylinux:9
+FROM ubuntu:22.04
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install development tools and dependencies
-RUN dnf -y update && \
-    dnf -y install dnf-plugins-core epel-release && \
-    dnf -y config-manager --set-enabled crb && \
-    dnf -y groupinstall "Development Tools" && \
-    dnf -y install \
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
     cmake \
-    gcc-c++ \
-    make \
-    git \
     ninja-build \
+    git \
     python3 \
     python3-pip \
     gdb \
     vim \
-    openssh-clients \
-    which \
-    tar \
+    openssh-client \
+    curl \
+    wget \
+    sudo \
+    pkg-config \
     clang \
-    clang-tools-extra \
+    clang-format \
+    clang-tidy \
     ccache \
-    sudo && \
-    dnf clean all
+    libgtest-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
 ARG USERNAME=vscode
