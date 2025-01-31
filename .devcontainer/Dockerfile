@@ -5,6 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install development tools and dependencies
 RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
+    apt-get update && \
     apt-get install -y \
     build-essential \
     cmake \
@@ -25,8 +28,8 @@ RUN apt-get update && \
     ccache \
     libgtest-dev \
     cmake-data \
-    gcc-12 \
-    g++-12 && \
+    gcc-13 \
+    g++-13 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -41,8 +44,8 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
 # Set up C++ development environment
-ENV CC=/usr/bin/gcc-12
-ENV CXX=/usr/bin/g++-12
+ENV CC=/usr/bin/gcc-13
+ENV CXX=/usr/bin/g++-13
 ENV CCACHE_DIR=/ccache
 
 # Switch to non-root user
