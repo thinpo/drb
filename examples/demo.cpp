@@ -6,6 +6,10 @@
 #include <thread>
 #include <vector>
 #include <unordered_set>
+#include "sale_condition.hpp"
+
+using namespace drb::market;
+using namespace std::chrono;
 
 // Demo class for custom type support
 class SensorReading {
@@ -400,17 +404,20 @@ void demoMarketData() {
     drb::market::QuoteBuffer quote_buffer;
     
     const std::string symbol = "AAPL";
-    std::unordered_set<std::string> excluded_conditions = {"OUT_OF_SEQUENCE", "LATE"};
+    std::unordered_set<SaleCondition> excluded_conditions = {
+        sale_condition::from_string("Z  "), // Out of sequence
+        sale_condition::from_string("L  ")  // Late
+    };
     
     // Simulate a trading day with some sample data
     std::cout << "\nSimulating market data...\n";
     
     // Morning session trades
-    trade_buffer.push(drb::market::Trade(symbol, 150.00, 100));
-    trade_buffer.push(drb::market::Trade(symbol, 150.25, 200));
-    trade_buffer.push(drb::market::Trade(symbol, 150.15, 150, "OUT_OF_SEQUENCE")); // This should be filtered out
-    trade_buffer.push(drb::market::Trade(symbol, 150.50, 300));
-    trade_buffer.push(drb::market::Trade(symbol, 150.75, 250));
+    trade_buffer.push(drb::market::Trade(symbol, 150.00, 100, "@  ")); // Regular trade
+    trade_buffer.push(drb::market::Trade(symbol, 150.25, 200, "F  ")); // Intermarket sweep
+    trade_buffer.push(drb::market::Trade(symbol, 150.15, 150, "Z  ")); // Out of sequence - should be filtered
+    trade_buffer.push(drb::market::Trade(symbol, 150.50, 300, "C  ")); // Cash trade
+    trade_buffer.push(drb::market::Trade(symbol, 150.75, 250, "E  ")); // Automatic execution
     
     // Morning session quotes
     quote_buffer.push(drb::market::Quote(symbol, 150.00, 150.05, 100, 100));
@@ -440,7 +447,8 @@ void demoMarketData() {
         auto time = std::chrono::system_clock::to_time_t(trade.timestamp);
         std::cout << std::put_time(std::localtime(&time), "%H:%M:%S")
                   << " - Price: " << trade.price
-                  << ", Size: " << trade.size << "\n";
+                  << ", Size: " << trade.size 
+                  << ", Condition: " << sale_condition::to_string(trade.sale_condition) << "\n";
     }
     
     // Calculate VWAP
@@ -455,6 +463,166 @@ void demoMarketData() {
               << "Spread: " << (best_ask - best_bid) << "\n";
 }
 
+void print_trade(const Trade& trade) {
+    std::cout << std::fixed << std::setprecision(2)
+              << trade.symbol << " @ $" << trade.price 
+              << " x " << trade.size 
+              << " [" << sale_condition::to_string(trade.sale_condition) << "]"
+              << " on " << trade.exchange << "\n";
+}
+
+void demo_sale_conditions() {
+    std::cout << "\n=== Sale Condition Demo ===\n";
+    
+    // Create a trade buffer
+    TradeBuffer buffer(10);
+    
+    // Add trades with various UTP conditions
+    buffer.push(Trade("AAPL", 150.50, 100, "@  ", "NASDAQ")); // Regular sale
+    buffer.push(Trade("AAPL", 150.55, 200, "F T", "NASDAQ")); // Intermarket sweep, Form T
+    buffer.push(Trade("AAPL", 150.45, 150, "I  ", "NASDAQ")); // Odd lot
+    buffer.push(Trade("AAPL", 150.60, 300, "XC ", "NASDAQ")); // Cross trade, Cash
+    
+    std::cout << "\nAll trades:\n";
+    for (const auto& trade : buffer) {
+        print_trade(trade);
+    }
+    
+    // Filter out odd lots and Form T trades
+    std::unordered_set<SaleCondition> excluded = {
+        sale_condition::from_string("I  "),
+        sale_condition::from_string("F T")
+    };
+    
+    std::cout << "\nFiltered trades (excluding odd lots and Form T):\n";
+    auto filtered = getFilteredTrades(buffer, "AAPL", excluded);
+    for (const auto& trade : filtered) {
+        print_trade(trade);
+    }
+    
+    // Validate UTP and CTA conditions
+    std::cout << "\nValidating sale conditions:\n";
+    SaleCondition utp_cond = sale_condition::from_string("@FT");
+    SaleCondition cta_cond = sale_condition::from_string("@CT");
+    
+    std::cout << "UTP condition '@FT': " 
+              << (sale_condition::is_valid_utp_condition(utp_cond) ? "Valid" : "Invalid")
+              << " for UTP\n";
+              
+    std::cout << "CTA condition '@CT': " 
+              << (sale_condition::is_valid_cta_condition(cta_cond) ? "Valid" : "Invalid")
+              << " for CTA\n";
+    
+    // Calculate VWAP excluding certain conditions
+    std::unordered_set<SaleCondition> vwap_excluded = {
+        sale_condition::from_string("I  "), // Exclude odd lots
+        sale_condition::from_string("X  ")  // Exclude cross trades
+    };
+    
+    double vwap = calculateVWAP(buffer, "AAPL", vwap_excluded);
+    std::cout << "\nVWAP (excluding odd lots and cross trades): $" << std::fixed << std::setprecision(2) << vwap << "\n";
+    
+    // Calculate OHLC bars
+    std::cout << "\nOHLC bars (1 second intervals):\n";
+    auto bars = calculateOHLC(buffer, "AAPL", seconds(1), vwap_excluded);
+    for (const auto& bar : bars) {
+        std::cout << "O: " << bar.open << " H: " << bar.high 
+                  << " L: " << bar.low << " C: " << bar.close 
+                  << " V: " << bar.volume << " #: " << bar.trade_count << "\n";
+    }
+}
+
+void demoThreadSafetyAndAPL() {
+    std::cout << "\n=== Thread Safety and APL Operations Demo ===\n";
+    
+    // Create two buffers
+    drb::DynamicRingBuffer<int> buffer1;
+    drb::DynamicRingBuffer<int> buffer2;
+    
+    // Fill buffers
+    for (int i = 1; i <= 3; ++i) buffer1.push(i);  // [1, 2, 3]
+    for (int i = 4; i <= 6; ++i) buffer2.push(i);  // [4, 5, 6]
+    
+    // Demonstrate outer product (multiplication)
+    std::cout << "\nOuter product (multiplication):\n";
+    auto outer = buffer1.outer_product(buffer2, std::multiplies<int>());
+    for (const auto& row : outer) {
+        for (int val : row) {
+            std::cout << std::setw(4) << val;
+        }
+        std::cout << '\n';
+    }
+    
+    // Demonstrate compress
+    std::vector<bool> mask = {true, false, true};  // Keep first and third elements
+    auto compressed = buffer1.compress(mask);
+    std::cout << "\nCompress ([1,2,3] with mask [1,0,1]):\n";
+    for (const auto& val : compressed) {
+        std::cout << val << " ";
+    }
+    std::cout << '\n';
+    
+    // Demonstrate expand
+    std::vector<bool> expand_mask = {true, false, true, false, true};
+    auto expanded = buffer1.expand(expand_mask, 0);
+    std::cout << "\nExpand ([1,2,3] with mask [1,0,1,0,1]):\n";
+    for (const auto& val : expanded) {
+        std::cout << val << " ";
+    }
+    std::cout << '\n';
+    
+    // Demonstrate scan (prefix sum)
+    auto scanned = buffer1.scan(std::plus<int>());
+    std::cout << "\nPrefix sum:\n";
+    for (const auto& val : scanned) {
+        std::cout << val << " ";
+    }
+    std::cout << '\n';
+    
+    // Demonstrate rotate
+    buffer1.rotate(1);
+    std::cout << "\nAfter rotating right by 1:\n";
+    for (const auto& val : buffer1) {
+        std::cout << val << " ";
+    }
+    std::cout << '\n';
+    
+    // Demonstrate thread safety
+    std::cout << "\nTesting thread safety with concurrent operations...\n";
+    drb::DynamicRingBuffer<int> shared_buffer;
+    std::vector<std::thread> threads;
+    
+    // Producer threads
+    for (int i = 0; i < 3; ++i) {
+        threads.emplace_back([&shared_buffer, i]() {
+            for (int j = 0; j < 100; ++j) {
+                shared_buffer.push(i * 100 + j);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+    }
+    
+    // Consumer threads
+    for (int i = 0; i < 2; ++i) {
+        threads.emplace_back([&shared_buffer]() {
+            for (int j = 0; j < 150; ++j) {
+                if (!shared_buffer.isEmpty()) {
+                    shared_buffer.pop();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    std::cout << "Final buffer size after concurrent operations: " 
+              << shared_buffer.getSize() << "\n";
+}
+
 int main() {
     try {
         demoBasicOperations();
@@ -465,6 +633,8 @@ int main() {
         demoLargeBuffer();
         demoSIMD();
         demoMarketData();  // Add market data demo
+        demo_sale_conditions();
+        demoThreadSafetyAndAPL();
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;

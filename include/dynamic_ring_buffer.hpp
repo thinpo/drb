@@ -12,6 +12,9 @@
 #include <string>
 #include <chrono>
 #include <unordered_set>
+#include <mutex>
+#include <shared_mutex>
+#include <memory>
 
 namespace drb {
 
@@ -70,185 +73,346 @@ namespace detail {
 template<typename T>
 class DynamicRingBuffer {
 private:
-    std::vector<T> buffer;
-    int head;
-    int tail;
-    int size;
+    struct BufferState {
+        std::vector<T> data;
+        int head;
+        int tail;
+        int size;
+        double cached_mean;
+        bool mean_is_valid;
+
+        BufferState(int capacity = 4) 
+            : data(capacity), head(0), tail(0), size(0), 
+              cached_mean(0), mean_is_valid(false) {}
+    };
+
+    std::shared_ptr<BufferState> state;
+    mutable std::unique_ptr<std::shared_mutex> mutex;
     static constexpr double SHRINK_FACTOR = 0.25;
-    mutable double cached_mean;
-    mutable bool mean_is_valid;
+
+    // Helper function to get a snapshot of the current data
+    std::vector<T> get_snapshot() const {
+        std::vector<T> snapshot;
+        {
+            std::shared_lock lock(*mutex);
+            snapshot.reserve(state->size);
+            
+            if (state->head < state->tail) {
+                snapshot.insert(snapshot.end(),
+                              state->data.begin() + state->head,
+                              state->data.begin() + state->tail);
+            } else if (state->size > 0) {
+                snapshot.insert(snapshot.end(),
+                              state->data.begin() + state->head,
+                              state->data.end());
+                snapshot.insert(snapshot.end(),
+                              state->data.begin(),
+                              state->data.begin() + state->tail);
+            }
+        }
+        return snapshot;
+    }
 
     void resize(int new_capacity) {
         std::vector<T> new_buffer(new_capacity);
-        int old_count = size;
-
-        if (head < tail) {
-            std::copy(buffer.begin() + head, buffer.begin() + tail, new_buffer.begin());
-        } else {
-            std::copy(buffer.begin() + head, buffer.end(), new_buffer.begin());
-            std::copy(buffer.begin(), buffer.begin() + tail, new_buffer.begin() + (buffer.size() - head));
+        int old_count;
+        std::vector<T> old_data;
+        
+        {
+            std::unique_lock lock(*mutex);
+            old_count = state->size;
+            old_data = std::move(state->data);
         }
-
-        head = 0;
-        tail = old_count;
-        buffer = std::move(new_buffer);
-        mean_is_valid = false;
+        
+        if (state->head < state->tail) {
+            std::copy(old_data.begin() + state->head, 
+                     old_data.begin() + state->tail, 
+                     new_buffer.begin());
+        } else if (old_count > 0) {
+            std::copy(old_data.begin() + state->head, 
+                     old_data.end(), 
+                     new_buffer.begin());
+            std::copy(old_data.begin(), 
+                     old_data.begin() + state->tail,
+                     new_buffer.begin() + (old_data.size() - state->head));
+        }
+        
+        {
+            std::unique_lock lock(*mutex);
+            state->head = 0;
+            state->tail = old_count;
+            state->data = std::move(new_buffer);
+            state->mean_is_valid = false;
+        }
     }
 
     template<bool IsConst>
     class Iterator {
     private:
         using BufferType = typename std::conditional<IsConst, const DynamicRingBuffer*, DynamicRingBuffer*>::type;
-        BufferType rb;
-        int index;
-        int actual_index;  // Cache the actual index to avoid repeated modulo
+        std::vector<T> snapshot;
+        size_t pos;
 
     public:
         using iterator_category = std::random_access_iterator_tag;
-        using value_type = T;
+        using value_type = typename std::conditional<IsConst, const T, T>::type;
         using difference_type = std::ptrdiff_t;
         using pointer = typename std::conditional<IsConst, const T*, T*>::type;
         using reference = typename std::conditional<IsConst, const T&, T&>::type;
 
-        Iterator(BufferType rb, int index) : rb(rb), index(index) {
-            actual_index = (rb->head + index) % rb->buffer.size();
+        Iterator(BufferType rb, size_t pos) {
+            if (rb) {
+                snapshot = rb->get_snapshot();
+            }
+            this->pos = pos;
         }
 
-        reference operator*() { return rb->buffer[actual_index]; }
-        pointer operator->() { return &(operator*()); }
+        reference operator*() { return snapshot[pos]; }
+        pointer operator->() { return &snapshot[pos]; }
+        const reference operator*() const { return snapshot[pos]; }
+        const pointer operator->() const { return &snapshot[pos]; }
 
-        Iterator& operator++() {
-            ++index;
-            actual_index = (rb->head + index) % rb->buffer.size();
-            return *this;
+        Iterator& operator++() { ++pos; return *this; }
+        Iterator operator++(int) { Iterator tmp = *this; ++pos; return tmp; }
+        Iterator& operator--() { --pos; return *this; }
+        Iterator operator--(int) { Iterator tmp = *this; --pos; return tmp; }
+
+        Iterator& operator+=(difference_type n) { pos += n; return *this; }
+        Iterator operator+(difference_type n) const { Iterator tmp = *this; return tmp += n; }
+        Iterator& operator-=(difference_type n) { pos -= n; return *this; }
+        Iterator operator-(difference_type n) const { Iterator tmp = *this; return tmp -= n; }
+        difference_type operator-(const Iterator& other) const { return pos - other.pos; }
+
+        bool operator==(const Iterator& other) const { 
+            return pos == other.pos && snapshot.size() == other.snapshot.size(); 
         }
-
-        Iterator operator++(int) { 
-            Iterator tmp = *this; 
-            ++(*this);
-            return tmp; 
-        }
-
-        Iterator& operator--() {
-            --index;
-            actual_index = (rb->head + index) % rb->buffer.size();
-            return *this;
-        }
-
-        Iterator operator--(int) { 
-            Iterator tmp = *this; 
-            --(*this);
-            return tmp; 
-        }
-
-        Iterator& operator+=(difference_type n) {
-            index += n;
-            actual_index = (rb->head + index) % rb->buffer.size();
-            return *this;
-        }
-
-        Iterator operator+(difference_type n) const {
-            Iterator tmp = *this;
-            return tmp += n;
-        }
-
-        Iterator& operator-=(difference_type n) {
-            return *this += -n;
-        }
-
-        Iterator operator-(difference_type n) const {
-            Iterator tmp = *this;
-            return tmp -= n;
-        }
-
-        difference_type operator-(const Iterator& other) const {
-            return index - other.index;
-        }
-
-        bool operator==(const Iterator& other) const { return index == other.index; }
         bool operator!=(const Iterator& other) const { return !(*this == other); }
-        bool operator<(const Iterator& other) const { return index < other.index; }
+        bool operator<(const Iterator& other) const { return pos < other.pos; }
         bool operator>(const Iterator& other) const { return other < *this; }
         bool operator<=(const Iterator& other) const { return !(other < *this); }
         bool operator>=(const Iterator& other) const { return !(*this < other); }
 
-        reference operator[](difference_type n) const {
-            return *(*this + n);
-        }
+        reference operator[](difference_type n) { return snapshot[pos + n]; }
+        const reference operator[](difference_type n) const { return snapshot[pos + n]; }
     };
-
-    friend Iterator<false> operator+(typename Iterator<false>::difference_type n, const Iterator<false>& it) {
-        return it + n;
-    }
-
-    friend Iterator<true> operator+(typename Iterator<true>::difference_type n, const Iterator<true>& it) {
-        return it + n;
-    }
 
 public:
     using iterator = Iterator<false>;
     using const_iterator = Iterator<true>;
 
     explicit DynamicRingBuffer(int initial_capacity = 4)
-        : buffer(initial_capacity), head(0), tail(0), size(0), mean_is_valid(false) {}
+        : state(std::make_shared<BufferState>(initial_capacity)),
+          mutex(std::make_unique<std::shared_mutex>()) {}
 
     ~DynamicRingBuffer() {
         // No need to delete buffer, std::vector handles it
     }
 
     DynamicRingBuffer(const DynamicRingBuffer& other)
-        : buffer(other.buffer), head(other.head), tail(other.tail), size(other.size), mean_is_valid(false) {}
+        : state(std::make_shared<BufferState>(*other.state)),
+          mutex(std::make_unique<std::shared_mutex>()) {}
 
     DynamicRingBuffer(DynamicRingBuffer&& other) noexcept
-        : buffer(std::move(other.buffer)), head(other.head), tail(other.tail), size(other.size), mean_is_valid(false) {
-        other.head = other.tail = other.size = 0;
+        : state(std::move(other.state)),
+          mutex(std::make_unique<std::shared_mutex>()) {
+        other.state = std::make_shared<BufferState>();
+    }
+
+    DynamicRingBuffer& operator=(const DynamicRingBuffer& other) {
+        if (this != &other) {
+            std::unique_lock lock(*mutex);
+            std::shared_lock other_lock(*other.mutex);
+            state = std::make_shared<BufferState>(*other.state);
+        }
+        return *this;
+    }
+
+    DynamicRingBuffer& operator=(DynamicRingBuffer&& other) noexcept {
+        if (this != &other) {
+            std::unique_lock lock(*mutex);
+            std::unique_lock other_lock(*other.mutex);
+            state = std::move(other.state);
+            other.state = std::make_shared<BufferState>();
+        }
+        return *this;
     }
 
     void push(const T& value) {
-        if (isFull()) {
-            resize(buffer.size() * 2);
+        bool needs_resize = false;
+        {
+            std::shared_lock lock(*mutex);
+            needs_resize = (state->size == state->data.size());
         }
-        buffer[tail] = value;
-        tail = (tail + 1) % buffer.size();
-        size++;
-        mean_is_valid = false;
+        
+        if (needs_resize) {
+            int new_capacity;
+            {
+                std::shared_lock lock(*mutex);
+                new_capacity = state->data.size() * 2;
+            }
+            resize(new_capacity);
+        }
+        
+        {
+            std::unique_lock lock(*mutex);
+            state->data[state->tail] = value;
+            state->tail = (state->tail + 1) % state->data.size();
+            state->size++;
+            state->mean_is_valid = false;
+        }
     }
 
     T pop() {
-        if (isEmpty()) {
-            throw std::runtime_error("Buffer is empty!");
+        T value;
+        bool needs_resize = false;
+        int current_size;
+        int current_capacity;
+        
+        {
+            std::unique_lock lock(*mutex);
+            if (state->size == 0) {
+                throw std::runtime_error("Buffer is empty!");
+            }
+            value = state->data[state->head];
+            state->head = (state->head + 1) % state->data.size();
+            state->size--;
+            current_size = state->size;
+            current_capacity = state->data.size();
+            needs_resize = (current_size < current_capacity * SHRINK_FACTOR && current_capacity > 4);
         }
-        T value = buffer[head];
-        head = (head + 1) % buffer.size();
-        size--;
 
-        if (size < buffer.size() * SHRINK_FACTOR && buffer.size() > 4) {
-            resize(buffer.size() / 2);
+        if (needs_resize) {
+            resize(current_capacity / 2);
         }
+        
         return value;
     }
 
-    bool isEmpty() const { return size == 0; }
-    bool isFull() const { return size == buffer.size(); }
-    int getCapacity() const { return buffer.size(); }
-    int getSize() const { return size; }
+    // APL-style operations
+    
+    // Outer product: applies a binary operation between all pairs of elements
+    template<typename BinaryOp>
+    std::vector<std::vector<T>> outer_product(const DynamicRingBuffer<T>& other, BinaryOp op) const {
+        std::shared_lock lock(*mutex);
+        std::shared_lock other_lock(*other.mutex);
+        
+        std::vector<std::vector<T>> result(state->size, std::vector<T>(other.state->size));
+        for (int i = 0; i < state->size; ++i) {
+            for (int j = 0; j < other.state->size; ++j) {
+                int this_idx = (state->head + i) % state->data.size();
+                int other_idx = (other.state->head + j) % other.state->data.size();
+                result[i][j] = op(state->data[this_idx], other.state->data[other_idx]);
+            }
+        }
+        return result;
+    }
+
+    // Compress: keep only elements where mask is true
+    DynamicRingBuffer<T> compress(const std::vector<bool>& mask) const {
+        std::shared_lock lock(*mutex);
+        if (mask.size() != state->size) {
+            throw std::invalid_argument("Mask size must match buffer size");
+        }
+
+        DynamicRingBuffer<T> result;
+        for (int i = 0; i < state->size; ++i) {
+            if (mask[i]) {
+                int idx = (state->head + i) % state->data.size();
+                result.push(state->data[idx]);
+            }
+        }
+        return result;
+    }
+
+    // Expand: insert default values where mask is false
+    DynamicRingBuffer<T> expand(const std::vector<bool>& mask, const T& default_value = T()) const {
+        std::shared_lock lock(*mutex);
+        DynamicRingBuffer<T> result;
+        int buffer_idx = 0;
+
+        for (bool keep : mask) {
+            if (keep && buffer_idx < state->size) {
+                int idx = (state->head + buffer_idx++) % state->data.size();
+                result.push(state->data[idx]);
+            } else {
+                result.push(default_value);
+            }
+        }
+        return result;
+    }
+
+    // Scan/Prefix operations with binary operator
+    template<typename BinaryOp>
+    DynamicRingBuffer<T> scan(BinaryOp op, const T& initial = T()) const {
+        std::shared_lock lock(*mutex);
+        DynamicRingBuffer<T> result;
+        if (isEmpty()) return result;
+
+        T accumulator = initial;
+        for (int i = 0; i < state->size; ++i) {
+            int idx = (state->head + i) % state->data.size();
+            accumulator = op(accumulator, state->data[idx]);
+            result.push(accumulator);
+        }
+        return result;
+    }
+
+    // Rotate elements by n positions
+    void rotate(int n) {
+        std::unique_lock lock(*mutex);
+        if (isEmpty()) return;
+        
+        n = ((n % state->size) + state->size) % state->size; // Normalize n to positive value
+        if (n == 0) return;
+
+        std::vector<T> temp(state->size);
+        for (int i = 0; i < state->size; ++i) {
+            int old_idx = (state->head + i) % state->data.size();
+            int new_idx = (i + n) % state->size;
+            temp[new_idx] = state->data[old_idx];
+        }
+
+        for (int i = 0; i < state->size; ++i) {
+            state->data[(state->head + i) % state->data.size()] = temp[i];
+        }
+    }
+
+    bool isEmpty() const { 
+        std::shared_lock lock(*mutex);
+        return state->size == 0; 
+    }
+    
+    bool isFull() const { 
+        std::shared_lock lock(*mutex);
+        return state->size == state->data.size(); 
+    }
+    
+    int getCapacity() const { 
+        std::shared_lock lock(*mutex);
+        return state->data.size(); 
+    }
+    
+    int getSize() const { 
+        std::shared_lock lock(*mutex);
+        return state->size; 
+    }
 
     void add(T value) {
         if constexpr (detail::SimdTraits<T>::has_simd) {
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (size >= Traits::vector_size) {
+            if (state->size >= Traits::vector_size) {
                 const SimdType value_vec = Traits::set1(value);
                 const size_t vec_size = Traits::vector_size;
                 
                 std::vector<T> aligned_data;
-                if (head < tail) {
-                    aligned_data.assign(buffer.begin() + head, buffer.begin() + tail);
+                if (state->head < state->tail) {
+                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
                 } else {
-                    aligned_data.reserve(size);
-                    aligned_data.insert(aligned_data.end(), buffer.begin() + head, buffer.end());
-                    aligned_data.insert(aligned_data.end(), buffer.begin(), buffer.begin() + tail);
+                    aligned_data.reserve(state->size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
                 }
 
                 size_t i = 0;
@@ -258,12 +422,12 @@ public:
                     Traits::store(&aligned_data[i], data);
                 }
 
-                if (head < tail) {
-                    std::copy(aligned_data.begin(), aligned_data.end(), buffer.begin() + head);
+                if (state->head < state->tail) {
+                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + state->head);
                 } else {
-                    size_t first_part = buffer.size() - head;
-                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, buffer.begin() + head);
-                    std::copy(aligned_data.begin() + first_part, aligned_data.end(), buffer.begin());
+                    size_t first_part = state->data.size() - state->head;
+                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + state->head);
+                    std::copy(aligned_data.begin() + first_part, aligned_data.end(), state->data.begin());
                 }
 
                 for (; i < aligned_data.size(); ++i) {
@@ -273,9 +437,9 @@ public:
             }
         }
         
-        for (int i = 0; i < size; i++) {
-            int idx = (head + i) % buffer.size();
-            buffer[idx] += value;
+        for (int i = 0; i < state->size; i++) {
+            int idx = (state->head + i) % state->data.size();
+            state->data[idx] += value;
         }
     }
 
@@ -284,17 +448,17 @@ public:
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (size >= Traits::vector_size) {
+            if (state->size >= Traits::vector_size) {
                 const SimdType value_vec = Traits::set1(value);
                 const size_t vec_size = Traits::vector_size;
                 
                 std::vector<T> aligned_data;
-                if (head < tail) {
-                    aligned_data.assign(buffer.begin() + head, buffer.begin() + tail);
+                if (state->head < state->tail) {
+                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
                 } else {
-                    aligned_data.reserve(size);
-                    aligned_data.insert(aligned_data.end(), buffer.begin() + head, buffer.end());
-                    aligned_data.insert(aligned_data.end(), buffer.begin(), buffer.begin() + tail);
+                    aligned_data.reserve(state->size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
                 }
 
                 size_t i = 0;
@@ -304,12 +468,12 @@ public:
                     Traits::store(&aligned_data[i], data);
                 }
 
-                if (head < tail) {
-                    std::copy(aligned_data.begin(), aligned_data.end(), buffer.begin() + head);
+                if (state->head < state->tail) {
+                    std::copy(aligned_data.begin(), aligned_data.end(), state->data.begin() + state->head);
                 } else {
-                    size_t first_part = buffer.size() - head;
-                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, buffer.begin() + head);
-                    std::copy(aligned_data.begin() + first_part, aligned_data.end(), buffer.begin());
+                    size_t first_part = state->data.size() - state->head;
+                    std::copy(aligned_data.begin(), aligned_data.begin() + first_part, state->data.begin() + state->head);
+                    std::copy(aligned_data.begin() + first_part, aligned_data.end(), state->data.begin());
                 }
 
                 for (; i < aligned_data.size(); ++i) {
@@ -319,9 +483,9 @@ public:
             }
         }
         
-        for (int i = 0; i < size; i++) {
-            int idx = (head + i) % buffer.size();
-            buffer[idx] *= value;
+        for (int i = 0; i < state->size; i++) {
+            int idx = (state->head + i) % state->data.size();
+            state->data[idx] *= value;
         }
     }
 
@@ -330,17 +494,17 @@ public:
             using Traits = detail::SimdTraits<T>;
             using SimdType = typename Traits::simd_type;
             
-            if (size >= Traits::vector_size) {
+            if (state->size >= Traits::vector_size) {
                 SimdType sum_vec = Traits::set1(0);
                 const size_t vec_size = Traits::vector_size;
                 std::vector<T> aligned_data;
                 
-                if (head < tail) {
-                    aligned_data.assign(buffer.begin() + head, buffer.begin() + tail);
+                if (state->head < state->tail) {
+                    aligned_data.assign(state->data.begin() + state->head, state->data.begin() + state->tail);
                 } else {
-                    aligned_data.reserve(size);
-                    aligned_data.insert(aligned_data.end(), buffer.begin() + head, buffer.end());
-                    aligned_data.insert(aligned_data.end(), buffer.begin(), buffer.begin() + tail);
+                    aligned_data.reserve(state->size);
+                    aligned_data.insert(aligned_data.end(), state->data.begin() + state->head, state->data.end());
+                    aligned_data.insert(aligned_data.end(), state->data.begin(), state->data.begin() + state->tail);
                 }
 
                 size_t i = 0;
@@ -360,94 +524,94 @@ public:
         }
         
         T total = 0;
-        for (int i = 0; i < size; i++) {
-            int idx = (head + i) % buffer.size();
-            total += buffer[idx];
+        for (int i = 0; i < state->size; i++) {
+            int idx = (state->head + i) % state->data.size();
+            total += state->data[idx];
         }
         return total;
     }
 
     T max() const {
         if (isEmpty()) throw std::runtime_error("Buffer is empty!");
-        T max_val = buffer[head];
-        for (int i = 1; i < size; i++) {
-            int idx = (head + i) % buffer.size();
-            max_val = std::max(max_val, buffer[idx]);
+        T max_val = state->data[state->head];
+        for (int i = 1; i < state->size; i++) {
+            int idx = (state->head + i) % state->data.size();
+            max_val = std::max(max_val, state->data[idx]);
         }
         return max_val;
     }
 
     std::vector<T> slice(int start, int end) const {
         std::vector<T> result;
-        int actual_size = size;
+        int actual_size = state->size;
         start = (start < 0) ? actual_size + start : start;
         end = (end < 0) ? actual_size + end : end;
         end = std::min(end, actual_size);
 
         for (int i = start; i < end; i++) {
-            int idx = (head + i) % buffer.size();
-            result.push_back(buffer[idx]);
+            int idx = (state->head + i) % state->data.size();
+            result.push_back(state->data[idx]);
         }
         return result;
     }
 
     void map(const std::function<T(T)>& func) {
-        for (int i = 0; i < size; i++) {
-            int idx = (head + i) % buffer.size();
-            buffer[idx] = func(buffer[idx]);
+        for (int i = 0; i < state->size; i++) {
+            int idx = (state->head + i) % state->data.size();
+            state->data[idx] = func(state->data[idx]);
         }
     }
 
     void reverse() {
         int left = 0;
-        int right = size - 1;
+        int right = state->size - 1;
         while (left < right) {
-            int left_idx = (head + left) % buffer.size();
-            int right_idx = (head + right) % buffer.size();
-            std::swap(buffer[left_idx], buffer[right_idx]);
+            int left_idx = (state->head + left) % state->data.size();
+            int right_idx = (state->head + right) % state->data.size();
+            std::swap(state->data[left_idx], state->data[right_idx]);
             left++;
             right--;
         }
     }
 
     void concatenate(const DynamicRingBuffer& other) {
-        for (int i = 0; i < other.size; i++) {
-            int idx = (other.head + i) % other.buffer.size();
-            this->push(other.buffer[idx]);
+        for (int i = 0; i < other.state->size; i++) {
+            int idx = (other.state->head + i) % other.state->data.size();
+            this->push(other.state->data[idx]);
         }
     }
 
     double mean() const {
         if (isEmpty()) throw std::runtime_error("Buffer is empty!");
-        if (!mean_is_valid) {
-            cached_mean = static_cast<double>(sum()) / size;
-            mean_is_valid = true;
+        if (!state->mean_is_valid) {
+            state->cached_mean = static_cast<double>(sum()) / state->size;
+            state->mean_is_valid = true;
         }
-        return cached_mean;
+        return state->cached_mean;
     }
 
     double variance() const {
-        if (size < 2) throw std::runtime_error("Need at least 2 elements!");
+        if (state->size < 2) throw std::runtime_error("Need at least 2 elements!");
         double m = mean();  // Use cached mean if available
         double sum_sq = 0;
         
-        if (head < tail) {
-            for (int i = head; i < tail; ++i) {
-                double diff = buffer[i] - m;
+        if (state->head < state->tail) {
+            for (int i = state->head; i < state->tail; ++i) {
+                double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
         } else {
-            for (int i = head; i < buffer.size(); ++i) {
-                double diff = buffer[i] - m;
+            for (int i = state->head; i < state->data.size(); ++i) {
+                double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
-            for (int i = 0; i < tail; ++i) {
-                double diff = buffer[i] - m;
+            for (int i = 0; i < state->tail; ++i) {
+                double diff = state->data[i] - m;
                 sum_sq += diff * diff;
             }
         }
         
-        return sum_sq / (size - 1);
+        return sum_sq / (state->size - 1);
     }
 
     double stddev() const {
@@ -459,34 +623,34 @@ public:
         
         // Use nth_element instead of full sort
         std::vector<T> temp;
-        temp.reserve(size);
+        temp.reserve(state->size);
         
-        if (head < tail) {
-            temp.insert(temp.end(), buffer.begin() + head, buffer.begin() + tail);
+        if (state->head < state->tail) {
+            temp.insert(temp.end(), state->data.begin() + state->head, state->data.begin() + state->tail);
         } else {
-            temp.insert(temp.end(), buffer.begin() + head, buffer.end());
-            temp.insert(temp.end(), buffer.begin(), buffer.begin() + tail);
+            temp.insert(temp.end(), state->data.begin() + state->head, state->data.end());
+            temp.insert(temp.end(), state->data.begin(), state->data.begin() + state->tail);
         }
         
-        if (size % 2 == 0) {
-            int mid = size / 2;
+        if (state->size % 2 == 0) {
+            int mid = state->size / 2;
             std::nth_element(temp.begin(), temp.begin() + mid - 1, temp.end());
             T left = temp[mid - 1];
             std::nth_element(temp.begin() + mid, temp.begin() + mid, temp.end());
             return (left + temp[mid]) / T(2);
         } else {
-            int mid = size / 2;
+            int mid = state->size / 2;
             std::nth_element(temp.begin(), temp.begin() + mid, temp.end());
             return temp[mid];
         }
     }
 
     iterator begin() { return iterator(this, 0); }
-    iterator end() { return iterator(this, size); }
+    iterator end() { return iterator(this, state->size); }
     const_iterator begin() const { return const_iterator(this, 0); }
-    const_iterator end() const { return const_iterator(this, size); }
+    const_iterator end() const { return const_iterator(this, state->size); }
     const_iterator cbegin() const { return const_iterator(this, 0); }
-    const_iterator cend() const { return const_iterator(this, size); }
+    const_iterator cend() const { return const_iterator(this, state->size); }
 };
 
 } // namespace drb 

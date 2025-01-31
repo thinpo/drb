@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <limits>
 #include "dynamic_ring_buffer.hpp"
+#include "sale_condition.hpp"
 
 namespace drb {
 namespace market {
@@ -33,15 +34,21 @@ struct Trade {
     std::string symbol;
     double price;
     int size;
-    std::string sale_condition;
+    SaleCondition sale_condition;
     std::string exchange;
 
     Trade() = default;
     Trade(const std::string& sym, double p, int s, 
-          const std::string& cond = "", const std::string& ex = "")
+          const SaleCondition& cond = sale_condition::from_string("   "), 
+          const std::string& ex = "")
         : timestamp(std::chrono::system_clock::now()),
           symbol(sym), price(p), size(s),
           sale_condition(cond), exchange(ex) {}
+
+    // Convenience constructor that takes string for sale condition
+    Trade(const std::string& sym, double p, int s, 
+          const std::string& cond, const std::string& ex = "")
+        : Trade(sym, p, s, sale_condition::from_string(cond), ex) {}
 };
 
 struct OHLC {
@@ -62,7 +69,7 @@ using TradeBuffer = DynamicRingBuffer<Trade>;
 using QuoteBuffer = DynamicRingBuffer<Quote>;
 
 // Helper functions
-inline bool shouldFilterTrade(const Trade& trade, const std::unordered_set<std::string>& excluded_conditions) {
+inline bool shouldFilterTrade(const Trade& trade, const std::unordered_set<SaleCondition>& excluded_conditions) {
     return excluded_conditions.find(trade.sale_condition) != excluded_conditions.end();
 }
 
@@ -71,7 +78,7 @@ template<typename Duration>
 std::vector<OHLC> calculateOHLC(const TradeBuffer& buffer,
                                const std::string& symbol,
                                Duration interval,
-                               const std::unordered_set<std::string>& excluded_conditions = {}) {
+                               const std::unordered_set<SaleCondition>& excluded_conditions = {}) {
     if (buffer.isEmpty()) return {};
 
     std::vector<OHLC> results;
@@ -119,7 +126,7 @@ std::vector<OHLC> calculateOHLC(const TradeBuffer& buffer,
 
 std::vector<Trade> getFilteredTrades(const TradeBuffer& buffer,
                                    const std::string& symbol,
-                                   const std::unordered_set<std::string>& excluded_conditions) {
+                                   const std::unordered_set<SaleCondition>& excluded_conditions) {
     std::vector<Trade> filtered_trades;
     for (const auto& trade : buffer) {
         if (trade.symbol == symbol && !shouldFilterTrade(trade, excluded_conditions)) {
@@ -131,7 +138,7 @@ std::vector<Trade> getFilteredTrades(const TradeBuffer& buffer,
 
 double calculateVWAP(const TradeBuffer& buffer,
                     const std::string& symbol,
-                    const std::unordered_set<std::string>& excluded_conditions = {}) {
+                    const std::unordered_set<SaleCondition>& excluded_conditions = {}) {
     double sum_pv = 0.0;
     int total_volume = 0;
 
