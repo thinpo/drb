@@ -23,7 +23,10 @@ RUN apt-get update && \
     clang-format \
     clang-tidy \
     ccache \
-    libgtest-dev && \
+    libgtest-dev \
+    cmake-data \
+    gcc-12 \
+    g++-12 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -38,8 +41,8 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
 # Set up C++ development environment
-ENV CC=/usr/bin/gcc
-ENV CXX=/usr/bin/g++
+ENV CC=/usr/bin/gcc-12
+ENV CXX=/usr/bin/g++-12
 ENV CCACHE_DIR=/ccache
 
 # Switch to non-root user
