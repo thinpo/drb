@@ -7,55 +7,41 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
-    name: CentOS 8 Build
+  rocky9-build:
+    name: Rocky Linux 9 Build
     runs-on: ubuntu-latest
-    container:
-      image: centos:8
-      options: --privileged
+    container: rockylinux/rockylinux:9
 
     strategy:
       matrix:
         build_type: [Release, Debug]
 
     steps:
-    - name: Install basic tools
-      run: |
-        cd /etc/yum.repos.d/
-        sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*
-        sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*
-        dnf -y install dnf-plugins-core epel-release
-        dnf config-manager --set-enabled powertools
-        dnf -y update
-        dnf -y install git make gcc gcc-c++ cmake3 which
-
     - uses: actions/checkout@v3
 
-    - name: Install GTest
+    - name: Install Dependencies
       run: |
-        dnf -y install wget unzip
-        wget https://github.com/google/googletest/archive/refs/tags/v1.13.0.zip
-        unzip v1.13.0.zip
-        cd googletest-1.13.0
-        cmake3 -B build -DCMAKE_BUILD_TYPE=Release
-        cmake3 --build build --config Release
-        cmake3 --install build
-        cd ..
+        dnf -y update
+        dnf -y groupinstall "Development Tools"
+        dnf -y install \
+          cmake \
+          gcc-c++ \
+          gtest-devel \
+          make \
+          git \
+          epel-release
+        dnf -y install ninja-build
 
     - name: Configure CMake
       run: |
-        cmake3 -B build \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DBUILD_TESTS=ON \
-          -DCMAKE_CXX_FLAGS="-mavx2"
+        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DBUILD_TESTS=ON
 
     - name: Build
-      run: cmake3 --build build --config ${{ matrix.build_type }}
+      run: cmake --build build --config ${{matrix.build_type}}
 
-    - name: Run Tests
+    - name: Test
       working-directory: build
-      run: |
-        ctest3 -C ${{ matrix.build_type }} --output-on-failure
+      run: ctest -C ${{matrix.build_type}} --output-on-failure
 
     - name: Run Demo
       working-directory: build
