@@ -1,0 +1,6 @@
+[submodule "nats.c"]
+	path = nats.c
+	url = https://github.com/nats-io/nats.c.git
+[submodule "third_party/googletest"]
+	path = third_party/googletest
+	url = https://github.com/google/googletest.git
