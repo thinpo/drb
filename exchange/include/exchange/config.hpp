@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <fstream>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
 
@@ -19,6 +20,7 @@ struct BarConfig {
 
 struct ExchangeConfig {
     std::string name;
+    std::string nats_url{"nats://localhost:4222"};  // Default NATS URL
     uint16_t market_data_port;
     uint16_t bar_publish_port;
     std::vector<BarConfig> bars;
@@ -37,6 +39,9 @@ struct ExchangeConfig {
         file >> j;
 
         config.name = j["name"].get<std::string>();
+        if (j.contains("nats_url")) {
+            config.nats_url = j["nats_url"].get<std::string>();
+        }
         config.market_data_port = j["market_data_port"].get<uint16_t>();
         config.bar_publish_port = j["bar_publish_port"].get<uint16_t>();
 

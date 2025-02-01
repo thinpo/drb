@@ -1,0 +1,5 @@
+pyzmq==25.1.2
+dash==2.15.0
+pandas==2.2.1
+numpy==1.26.4
+plotly==5.19.0 

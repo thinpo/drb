@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(dynamic_ring_buffer VERSION 1.0.0 LANGUAGES CXX)
+project(drb VERSION 1.0.0 LANGUAGES CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -18,11 +18,11 @@ if(COMPILER_SUPPORTS_AVX2)
 endif()
 
 # Options
-option(BUILD_TESTS "Build test programs" OFF)
+option(BUILD_TESTS "Build test programs" ON)
 option(BUILD_EXAMPLES "Build example programs" ON)
 
 # Add include directories
-include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Library target (header-only, but useful for installation and dependency management)
 add_library(dynamic_ring_buffer INTERFACE)
@@ -37,19 +37,31 @@ if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Add exchange engine
+add_subdirectory(exchange)
+
 # Tests
 if(BUILD_TESTS)
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.14.0  # Use the latest stable release
-    )
-    # For Windows: Prevent overriding the parent project's compiler/linker settings
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+    # Add GoogleTest subdirectory
+    add_subdirectory(third_party/googletest)
     enable_testing()
-    add_subdirectory(tests)
+
+    # Add test executable
+    add_executable(ring_buffer_test tests/ring_buffer_test.cpp)
+    target_link_libraries(ring_buffer_test 
+        GTest::gtest 
+        GTest::gtest_main 
+        Threads::Threads
+    )
+
+    # Include directories
+    target_include_directories(ring_buffer_test PRIVATE 
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/third_party/googletest/googletest/include
+    )
+
+    # Add test
+    add_test(NAME ring_buffer_test COMMAND ring_buffer_test)
 endif()
 
 # Installation
@@ -90,4 +102,13 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/dynamic_ring_buffer-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/dynamic_ring_buffer-config-version.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dynamic_ring_buffer
-) 
+)
+
+# Enable optimizations and debug info
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g")
+
+# Enable thread sanitizer for testing
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
+endif() 

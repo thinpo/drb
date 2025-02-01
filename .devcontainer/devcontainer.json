@@ -1,11 +1,9 @@
 {
-    "name": "Ubuntu C++",
+    "name": "C++ Development Container",
     "build": {
-        "dockerfile": "Dockerfile",
-        "context": "."
+        "dockerfile": "Dockerfile"
     },
     "features": {
-        "ghcr.io/devcontainers/features/git:1": {},
         "ghcr.io/devcontainers/features/github-cli:1": {}
     },
     "customizations": {
@@ -14,54 +12,11 @@
                 "ms-vscode.cpptools",
                 "ms-vscode.cmake-tools",
                 "twxs.cmake",
-                "ms-vscode.cpptools-extension-pack",
-                "ms-vscode.cpptools-themes",
-                "jeff-hykin.better-cpp-syntax",
-                "eamodio.gitlens",
-                "GitHub.vscode-pull-request-github",
-                "GitHub.github-vscode-theme",
-                "GitHub.copilot",
-                "GitHub.copilot-chat",
-                "streetsidesoftware.code-spell-checker",
-                "wayou.vscode-todo-highlight",
-                "aaron-bond.better-comments",
-                "shardulm94.trailing-spaces",
-                "vscode-icons-team.vscode-icons"
-            ],
-            "settings": {
-                "cmake.configureOnOpen": true,
-                "cmake.buildDirectory": "${workspaceFolder}/build",
-                "cmake.generator": "Ninja",
-                "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-                "C_Cpp.clang_format_fallbackStyle": "Google",
-                "C_Cpp.formatting": "clangFormat",
-                "C_Cpp.intelliSenseEngine": "default",
-                "C_Cpp.enhancedColorization": "enabled",
-                "editor.formatOnSave": true,
-                "editor.formatOnType": true,
-                "editor.rulers": [
-                    80,
-                    120
-                ],
-                "editor.guides.bracketPairs": true,
-                "editor.bracketPairColorization.enabled": true,
-                "editor.suggestSelection": "first",
-                "editor.snippetSuggestions": "top",
-                "files.trimTrailingWhitespace": true,
-                "files.insertFinalNewline": true,
-                "files.trimFinalNewlines": true,
-                "git.enableSmartCommit": true,
-                "git.autofetch": true,
-                "github.copilot.enable": {
-                    "*": true,
-                    "plaintext": false,
-                    "markdown": false,
-                    "scminput": false
-                }
-            }
+                "ms-vscode.cpptools-extension-pack"
+            ]
         }
     },
     "forwardPorts": [],
-    "postCreateCommand": "cmake -B build -G Ninja -DBUILD_TESTS=ON && cmake --build build",
+    "postCreateCommand": "git config --global init.defaultBranch main",
     "remoteUser": "vscode"
-}
+} 

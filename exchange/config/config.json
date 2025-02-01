@@ -1,11 +1,12 @@
 {
     "name": "SimulatedExchange",
-    "market_data_port": 5555,
-    "bar_publish_port": 5556,
+    "nats_url": "nats://localhost:4222",
+    "market_data_port": 9555,
+    "bar_publish_port": 9556,
     "exchange_endpoints": {
-        "NASDAQ": "tcp://localhost:5557",
-        "NYSE": "tcp://localhost:5558",
-        "IEX": "tcp://localhost:5559"
+        "NASDAQ": "tcp://localhost:9555",
+        "NYSE": "tcp://localhost:9555",
+        "IEX": "tcp://localhost:9555"
     },
     "bars": [
         {
